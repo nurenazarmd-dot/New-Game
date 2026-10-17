@@ -1,0 +1,6 @@
+{
+  "name": "Synapse Weaver",
+  "description": "A minimalist one-tap cyberpunk neural orbital rhythm-action game optimized for YouTube Playables.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

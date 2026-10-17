@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Synapse Weaver</title>
+    <!-- YouTube Playables SDK (Gracefully handled if not present) -->
+    <script src="https://www.youtube.com/game_api/v1" async></script>
+    <style>
+        :root {
+            --bg-dark: #030308;
+            --neon-cyan: #00f3ff;
+            --neon-magenta: #ff007f;
+            --neon-purple: #9d00ff;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            background-color: var(--bg-dark);
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            touch-action: none;
+        }
+
+        #game-wrapper {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: radial-gradient(circle at center, #0a0a1a 0%, #020205 100%);
+        }
+
+        /* Strict 9:16 Aspect Ratio Scaling Container (360x640 Virtual Resolution) */
+        #game-canvas {
+            background-color: #05050d;
+            box-shadow: 0 0 30px rgba(0, 243, 255, 0.15);
+            max-width: 100%;
+            max-height: 100%;
+            aspect-ratio: 9 / 16;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+            display: block;
+            cursor: pointer;
+        }
+
+        @media (min-aspect-ratio: 9/16) {
+            #game-canvas {
+                height: 100vh;
+                width: calc(100vh * (9 / 16));
+            }
+        }
+
+        @media (max-aspect-ratio: 9/16) {
+            #game-canvas {
+                width: 100vw;
+                height: calc(100vw * (16 / 9));
+            }
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-wrapper">
+    <canvas id="game-canvas" width="360" height="640"></canvas>
+</div>
+
+<script>
+/**
+ * SYNAPSE WEAVER
+ * Production-Ready HTML5 Canvas Game for YouTube Playables
+ */
+(function() {
+    'use strict';
+
+    // --- 1. VIRTUAL RESOLUTION & SPATIAL CONSTANTS ---
+    const V_WIDTH = 360;
+    const V_HEIGHT = 640;
+    const CENTER_X = V_WIDTH / 2;
+    const CENTER_Y = V_HEIGHT / 2;
+    const TWO_PI = Math.PI * 2;
+
+    const INNER_RADIUS = 76;
+    const OUTER_RADIUS = 128;
+    const PLAYER_RADIUS = 8;
+    const OBSTACLE_RADIUS = 9;
+
+    const canvas = document.getElementById('game-canvas');
+    const ctx = canvas.getContext('2d');
+
+    // --- 2. YOUTUBE PLAYABLES SDK INTEGRATION ---
+    const YT_SDK = {
+        isAvailable: () => typeof window.ytgame !== 'undefined',
+        firstFrameReady: function() {
+            try {
+                if (this.isAvailable() && window.ytgame.game && typeof window.ytgame.game.firstFrameReady === 'function') {
+                    window.ytgame.game.firstFrameReady();
+                }
+            } catch (e) { console.warn('YT SDK firstFrameReady error:', e); }
+        },
+        gameReady: function() {
+            try {
+                if (this.isAvailable() && window.ytgame.game && typeof window.ytgame.game.gameReady === 'function') {
+                    window.ytgame.game.gameReady();
+                }
+            } catch (e) { console.warn('YT SDK gameReady error:', e); }
+        },
+        sendScore: function(score) {
+            try {
+                if (this.isAvailable() && window.ytgame.engagement && typeof window.ytgame.engagement.sendScore === 'function') {
+                    window.ytgame.engagement.sendScore({ value: Math.floor(score) });
+                }
+            } catch (e) { console.warn('YT SDK sendScore error:', e); }
+        },
+        initLifecycle: function(pauseCallback, resumeCallback) {
+            try {
+                if (this.isAvailable() && window.ytgame.system) {
+                    if (typeof window.ytgame.system.onPause === 'function') {
+                        window.ytgame.system.onPause(pauseCallback);
+                    }
+                    if (typeof window.ytgame.system.onResume === 'function') {
+                        window.ytgame.system.onResume(resumeCallback);
+                    }
+                }
+            } catch (e) { console.warn('YT SDK lifecycle error:', e); }
+
+            window.addEventListener('pause', pauseCallback);
+            window.addEventListener('resume', resumeCallback);
+            window.addEventListener('blur', pauseCallback);
+            window.addEventListener('focus', resumeCallback);
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) pauseCallback();
+                else resumeCallback();
+            });
+        }
+    };
+
+    // --- 3. WEB AUDIO SYNTHESIZER ---
+    class SoundSystem {
+        constructor() {
+            this.ctx = null;
+            this.isMuted = false;
+        }
+
+        init() {
+            if (!this.ctx) {
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (AudioCtx) this.ctx = new AudioCtx();
+            }
+            if (this.ctx && this.ctx.state === 'suspended' && !this.isMuted) {
+                this.ctx.resume();
+            }
+        }
+
+        mute() {
+            this.isMuted = true;
+            if (this.ctx && this.ctx.state === 'running') {
+                this.ctx.suspend();
+            }
+        }
+
+        unmute() {
+            this.isMuted = false;
+            if (this.ctx && this.ctx.state === 'suspended') {
+                this.ctx.resume();
+            }
+        }
+
+        playSwitch(isOuter) {
+            if (this.isMuted || !this.ctx) return;
+            try {
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'sine';
+                const startFreq = isOuter ? 320 : 520;
+                const endFreq = isOuter ? 580 : 300;
+                osc.frequency.setValueAtTime(startFreq, this.ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(endFreq, this.ctx.currentTime + 0.09);
+                gain.gain.setValueAtTime(0.15, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.09);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start();
+                osc.stop(this.ctx.currentTime + 0.09);
+            } catch (e) {}
+        }
+
+        playScore() {
+            if (this.isMuted || !this.ctx) return;
+            try {
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(880, this.ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(1320, this.ctx.currentTime + 0.12);
+                gain.gain.setValueAtTime(0.08, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.12);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start();
+                osc.stop(this.ctx.currentTime + 0.12);
+            } catch (e) {}
+        }
+
+        playCrash() {
+            if (this.isMuted || !this.ctx) return;
+            try {
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(160, this.ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(35, this.ctx.currentTime + 0.45);
+                gain.gain.setValueAtTime(0.25, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.45);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start();
+                osc.stop(this.ctx.currentTime + 0.45);
+            } catch (e) {}
+        }
+    }
+
+    const audio = new SoundSystem();
+
+    // --- 4. MATHEMATICAL UTILITIES (ANGULAR NORMALIZATION) ---
+    function normalizeAngle(angle) {
+        return ((angle % TWO_PI) + TWO_PI) % TWO_PI;
+    }
+
+    function getAngularDistance(a, b) {
+        const diff = Math.abs(normalizeAngle(a) - normalizeAngle(b));
+        return Math.min(diff, TWO_PI - diff);
+    }
+
+    // --- 5. GAME STATE & ENTITIES ---
+    const STATE = { START: 0, PLAYING: 1, GAMEOVER: 2 };
+    let currentState = STATE.START;
+    let isPaused = false;
+    let lastFrameTime = 0;
+    let rafId = null;
+
+    let score = 0;
+    let bestScore = 0;
+    let difficultyMultiplier = 1;
+    let screenShake = 0;
+    let corePulse = 0;
+
+    const player = {
+        angle: 0,
+        lane: 0,
+        currentRadius: INNER_RADIUS,
+        targetRadius: INNER_RADIUS,
+        baseAngularSpeed: 2.3,
+        trail: [],
+        reset() {
+            this.angle = normalizeAngle(-Math.PI / 2);
+            this.lane = 0;
+            this.currentRadius = INNER_RADIUS;
+            this.targetRadius = INNER_RADIUS;
+            this.trail = [];
+        }
+    };
+
+    let obstacles = [];
+    let particles = [];
+    let bgSynapses = [];
+    let spawnTimer = 0;
+
+    function initBackground() {
+        bgSynapses = [];
+        for (let i = 0; i < 25; i++) {
+            bgSynapses.push({
+                x: Math.random() * V_WIDTH,
+                y: Math.random() * V_HEIGHT,
+                vx: (Math.random() - 0.5) * 12,
+                vy: (Math.random() - 0.5) * 12,
+                radius: Math.random() * 1.8 + 0.5,
+                alpha: Math.random() * 0.4 + 0.1
+            });
+        }
+    }
+
+    function spawnParticles(x, y, color, count, speedScale = 1) {
+        for (let i = 0; i < count; i++) {
+            const angle = Math.random() * TWO_PI;
+            const speed = (Math.random() * 90 + 30) * speedScale;
+            particles.push({
+                x, y,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                radius: Math.random() * 3 + 1.5,
+                color,
+                alpha: 1,
+                decay: Math.random() * 1.5 + 1.2
+            });
+        }
+    }
+
+    function spawnObstacle() {
+        const offsetAngle = Math.PI * 0.85 + Math.random() * (Math.PI * 0.45);
+        const spawnAngle = normalizeAngle(player.angle + offsetAngle);
+        const lane = Math.random() < 0.5 ? 0 : 1;
+        const targetRadius = lane === 0 ? INNER_RADIUS : OUTER_RADIUS;
+
+        for (let i = 0; i < obstacles.length; i++) {
+            const obs = obstacles[i];
+            const dist = getAngularDistance(spawnAngle, obs.angle);
+            if (dist < 0.45 && obs.lane === lane) return;
+            if (dist < 0.35 && obs.lane !== lane) return;
+        }
+
+        obstacles.push({
+            angle: spawnAngle,
+            lane,
+            radius: targetRadius,
+            angularSpeed: (0.45 + Math.random() * 0.35) * difficultyMultiplier,
+            scale: 0,
+            active: false,
+            pulsePhase: Math.random() * TWO_PI,
+            maxLifeTime: 7.5,
+            age: 0
+        });
+    }
+
+    function handleInput(e) {
+        if (e && e.cancelable) e.preventDefault();
+        if (isPaused) return;
+        audio.init();
+
+        if (currentState === STATE.START) {
+            startGame();
+        } else if (currentState === STATE.PLAYING) {
+            toggleLane();
+        } else if (currentState === STATE.GAMEOVER && screenShake <= 0.5) {
+            resetToPlay();
+        }
+    }
+
+    function toggleLane() {
+        player.lane = player.lane === 0 ? 1 : 0;
+        player.targetRadius = player.lane === 0 ? INNER_RADIUS : OUTER_RADIUS;
+        audio.playSwitch(player.lane === 1);
+
+        const px = CENTER_X + Math.cos(player.angle) * player.currentRadius;
+        const py = CENTER_Y + Math.sin(player.angle) * player.currentRadius;
+        spawnParticles(px, py, '#00f3ff', 8, 0.6);
+    }
+
+    canvas.addEventListener('pointerdown', handleInput, { passive: false });
+    window.addEventListener('keydown', (e) => {
+        if (e.code === 'Space' || e.code === 'Enter' || e.code === 'ArrowUp' || e.code === 'ArrowDown') {
+            handleInput(e);
+        }
+    });
+
+    function startGame() {
+        YT_SDK.gameReady();
+        resetToPlay();
+    }
+
+    function resetToPlay() {
+        score = 0;
+        difficultyMultiplier = 1;
+        obstacles = [];
+        particles = [];
+        spawnTimer = 0.6;
+        player.reset();
+        currentState = STATE.PLAYING;
+    }
+
+    function triggerGameOver(crashX, crashY) {
+        currentState = STATE.GAMEOVER;
+        screenShake = 14;
+        audio.playCrash();
+        spawnParticles(crashX, crashY, '#ff007f', 35, 1.5);
+        spawnParticles(crashX, crashY, '#00f3ff', 25, 1.2);
+        if (score > bestScore) bestScore = Math.floor(score);
+        YT_SDK.sendScore(score);
+    }
+
+    function update(dt) {
+        corePulse = normalizeAngle(corePulse + dt * 3);
+        if (screenShake > 0) screenShake = Math.max(0, screenShake - dt * 35);
+
+        for (let i = 0; i < bgSynapses.length; i++) {
+            const node = bgSynapses[i];
+            node.x += node.vx * dt;
+            node.y += node.vy * dt;
+            if (node.x < 0) node.x = V_WIDTH;
+            if (node.x > V_WIDTH) node.x = 0;
+            if (node.y < 0) node.y = V_HEIGHT;
+            if (node.y > V_HEIGHT) node.y = 0;
+        }
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+            const p = particles[i];
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.alpha -= p.decay * dt;
+            if (p.alpha <= 0) particles.splice(i, 1);
+        }
+
+        if (currentState === STATE.START) {
+            player.angle = normalizeAngle(player.angle + 1.5 * dt);
+            const px = CENTER_X + Math.cos(player.angle) * player.currentRadius;
+            const py = CENTER_Y + Math.sin(player.angle) * player.currentRadius;
+            player.trail.push({ x: px, y: py, alpha: 1 });
+            if (player.trail.length > 18) player.trail.shift();
+            for (let i = 0; i < player.trail.length; i++) player.trail[i].alpha -= dt * 2.5;
+            return;
+        }
+
+        if (currentState !== STATE.PLAYING) return;
+
+        const prevScoreInt = Math.floor(score / 10);
+        score += dt * 12 * difficultyMultiplier;
+        if (Math.floor(score / 10) > prevScoreInt) {
+            audio.playScore();
+            corePulse = 0;
+        }
+
+        difficultyMultiplier = 1 + Math.min(1.4, score / 450);
+
+        const currentSpeed = player.baseAngularSpeed * difficultyMultiplier;
+        player.angle = normalizeAngle(player.angle + currentSpeed * dt);
+
+        const radiusDiff = player.targetRadius - player.currentRadius;
+        player.currentRadius += radiusDiff * Math.min(1, dt * 22);
+
+        const px = CENTER_X + Math.cos(player.angle) * player.currentRadius;
+        const py = CENTER_Y + Math.sin(player.angle) * player.currentRadius;
+
+        player.trail.push({ x: px, y: py, alpha: 1 });
+        if (player.trail.length > 22) player.trail.shift();
+        for (let i = 0; i < player.trail.length; i++) {
+            player.trail[i].alpha = (i + 1) / player.trail.length;
+        }
+
+        spawnTimer -= dt;
+        if (spawnTimer <= 0) {
+            spawnObstacle();
+            const minInterval = 0.42;
+            const baseInterval = Math.max(minInterval, 1.35 - (score / 350));
+            spawnTimer = baseInterval + Math.random() * 0.35;
+        }
+
+        for (let i = obstacles.length - 1; i >= 0; i--) {
+            const obs = obstacles[i];
+            obs.age += dt;
+            obs.pulsePhase = normalizeAngle(obs.pulsePhase + dt * 8);
+
+            if (obs.age < 0.35) {
+                obs.scale = obs.age / 0.35;
+                obs.active = obs.scale > 0.8;
+            } else if (obs.age > obs.maxLifeTime - 0.4) {
+                obs.scale = Math.max(0, (obs.maxLifeTime - obs.age) / 0.4);
+                obs.active = false;
+            } else {
+                obs.scale = 1;
+                obs.active = true;
+            }
+
+            obs.angle = normalizeAngle(obs.angle - obs.angularSpeed * dt);
+
+            const ox = CENTER_X + Math.cos(obs.angle) * obs.radius;
+            const oy = CENTER_Y + Math.sin(obs.angle) * obs.radius;
+
+            if (obs.active) {
+                const dx = px - ox;
+                const dy = py - oy;
+                const distSq = dx * dx + dy * dy;
+                const hitRadius = (PLAYER_RADIUS + OBSTACLE_RADIUS * obs.scale) - 2;
+                if (distSq < hitRadius * hitRadius) {
+                    triggerGameOver(px, py);
+                    return;
+                }
+            }
+
+            if (obs.age >= obs.maxLifeTime) obstacles.splice(i, 1);
+        }
+    }
+
+    function draw() {
+        ctx.save();
+        if (screenShake > 0) {
+            ctx.translate((Math.random() - 0.5) * screenShake, (Math.random() - 0.5) * screenShake);
+        }
+
+        const bgGrad = ctx.createRadialGradient(CENTER_X, CENTER_Y, 10, CENTER_X, CENTER_Y, V_HEIGHT * 0.75);
+        bgGrad.addColorStop(0, '#0f0c24');
+        bgGrad.addColorStop(0.5, '#070612');
+        bgGrad.addColorStop(1, '#020206');
+        ctx.fillStyle = bgGrad;
+        ctx.fillRect(0, 0, V_WIDTH, V_HEIGHT);
+
+        ctx.lineWidth = 0.5;
+        for (let i = 0; i < bgSynapses.length; i++) {
+            const n1 = bgSynapses[i];
+            ctx.fillStyle = `rgba(157, 0, 255, ${n1.alpha})`;
+            ctx.beginPath();
+            ctx.arc(n1.x, n1.y, n1.radius, 0, TWO_PI);
+            ctx.fill();
+
+            for (let j = i + 1; j < bgSynapses.length; j++) {
+                const n2 = bgSynapses[j];
+                const dx = n1.x - n2.x;
+                const dy = n1.y - n2.y;
+                const dist = dx * dx + dy * dy;
+                if (dist < 6500) {
+                    ctx.strokeStyle = `rgba(0, 243, 255, ${(1 - dist / 6500) * 0.12})`;
+                    ctx.beginPath();
+                    ctx.moveTo(n1.x, n1.y);
+                    ctx.lineTo(n2.x, n2.y);
+                    ctx.stroke();
+                }
+            }
+        }
+
+        const pulseOffset = Math.sin(corePulse) * 4;
+        ctx.strokeStyle = 'rgba(157, 0, 255, 0.12)';
+        ctx.lineWidth = 1;
+        for (let i = 0; i < 8; i++) {
+            const spokeAngle = (i * Math.PI) / 4 + corePulse * 0.1;
+            ctx.beginPath();
+            ctx.moveTo(CENTER_X + Math.cos(spokeAngle) * 28, CENTER_Y + Math.sin(spokeAngle) * 28);
+            ctx.lineTo(CENTER_X + Math.cos(spokeAngle) * OUTER_RADIUS, CENTER_Y + Math.sin(spokeAngle) * OUTER_RADIUS);
+            ctx.stroke();
+        }
+
+        ctx.beginPath();
+        ctx.arc(CENTER_X, CENTER_Y, INNER_RADIUS, 0, TWO_PI);
+        ctx.strokeStyle = player.lane === 0 ? 'rgba(0, 243, 255, 0.45)' : 'rgba(0, 243, 255, 0.15)';
+        ctx.lineWidth = player.lane === 0 ? 2.5 : 1.5;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(CENTER_X, CENTER_Y, OUTER_RADIUS, 0, TWO_PI);
+        ctx.strokeStyle = player.lane === 1 ? 'rgba(0, 243, 255, 0.45)' : 'rgba(0, 243, 255, 0.15)';
+        ctx.lineWidth = player.lane === 1 ? 2.5 : 1.5;
+        ctx.stroke();
+
+        ctx.save();
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = '#9d00ff';
+        ctx.fillStyle = 'rgba(157, 0, 255, 0.25)';
+        ctx.beginPath();
+        ctx.arc(CENTER_X, CENTER_Y, 22 + pulseOffset, 0, TWO_PI);
+        ctx.fill();
+
+        ctx.fillStyle = '#00f3ff';
+        ctx.beginPath();
+        ctx.arc(CENTER_X, CENTER_Y, 6 + pulseOffset * 0.3, 0, TWO_PI);
+        ctx.fill();
+        ctx.restore();
+
+        for (let i = 0; i < obstacles.length; i++) {
+            const obs = obstacles[i];
+            const ox = CENTER_X + Math.cos(obs.angle) * obs.radius;
+            const oy = CENTER_Y + Math.sin(obs.angle) * obs.radius;
+            const r = OBSTACLE_RADIUS * obs.scale;
+            if (r <= 0.1) continue;
+
+            ctx.save();
+            ctx.shadowBlur = 14;
+            ctx.shadowColor = '#ff007f';
+
+            const auraRadius = r + Math.sin(obs.pulsePhase) * 2.5;
+            ctx.strokeStyle = 'rgba(255, 0, 127, 0.6)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(ox, oy, Math.max(0.1, auraRadius), 0, TWO_PI);
+            ctx.stroke();
+
+            ctx.fillStyle = '#ff007f';
+            ctx.beginPath();
+            ctx.arc(ox, oy, r, 0, TWO_PI);
+            ctx.fill();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(ox, oy, r * 0.4, 0, TWO_PI);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        if (currentState !== STATE.GAMEOVER) {
+            for (let i = 0; i < player.trail.length; i++) {
+                const t = player.trail[i];
+                if (t.alpha <= 0) continue;
+                ctx.fillStyle = `rgba(0, 243, 255, ${t.alpha * 0.45})`;
+                ctx.beginPath();
+                ctx.arc(t.x, t.y, PLAYER_RADIUS * (i / player.trail.length) * 0.9, 0, TWO_PI);
+                ctx.fill();
+            }
+
+            const px = CENTER_X + Math.cos(player.angle) * player.currentRadius;
+            const py = CENTER_Y + Math.sin(player.angle) * player.currentRadius;
+
+            ctx.save();
+            ctx.shadowBlur = 18;
+            ctx.shadowColor = '#00f3ff';
+            ctx.fillStyle = '#00f3ff';
+            ctx.beginPath();
+            ctx.arc(px, py, PLAYER_RADIUS, 0, TWO_PI);
+            ctx.fill();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(px, py, PLAYER_RADIUS * 0.5, 0, TWO_PI);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        for (let i = 0; i < particles.length; i++) {
+            const p = particles[i];
+            ctx.save();
+            ctx.globalAlpha = Math.max(0, p.alpha);
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = p.color;
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.radius, 0, TWO_PI);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        drawHUD();
+        ctx.restore();
+    }
+
+    function drawHUD() {
+        ctx.textAlign = 'center';
+        if (currentState === STATE.START) {
+            ctx.fillStyle = 'rgba(3, 3, 8, 0.55)';
+            ctx.fillRect(0, 0, V_WIDTH, V_HEIGHT);
+
+            ctx.save();
+            ctx.shadowBlur = 15;
+            ctx.shadowColor = '#00f3ff';
+            ctx.fillStyle = '#ffffff';
+            ctx.font = '900 32px "Segoe UI", Roboto, sans-serif';
+            ctx.fillText('SYNAPSE', CENTER_X, 115);
+
+            ctx.fillStyle = '#00f3ff';
+            ctx.font = '700 26px "Segoe UI", Roboto, sans-serif';
+            ctx.fillText('WEAVER', CENTER_X, 148);
+            ctx.restore();
+
+            const promptAlpha = 0.5 + Math.sin(corePulse * 1.5) * 0.5;
+            ctx.fillStyle = `rgba(0, 243, 255, ${promptAlpha})`;
+            ctx.font = '600 16px "Segoe UI", Roboto, sans-serif';
+            ctx.fillText('TAP ANYWHERE TO START', CENTER_X, V_HEIGHT - 95);
+
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+            ctx.font = '400 12px "Segoe UI", Roboto, sans-serif';
+            ctx.fillText('TAP TO SWITCH NEURAL LANES & DODGE CORRUPTION', CENTER_X, V_HEIGHT - 65);
+        } else if (currentState === STATE.PLAYING) {
+            ctx.save();
+            ctx.shadowBlur = 12;
+            ctx.shadowColor = '#00f3ff';
+            ctx.fillStyle = '#ffffff';
+            ctx.font = '800 44px "Segoe UI", Roboto, sans-serif';
+            ctx.fillText(Math.floor(score).toString(), CENTER_X, 95);
+
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = 'rgba(0, 243, 255, 0.7)';
+            ctx.font = '600 11px "Segoe UI", Roboto, sans-serif';
+            ctx.fillText(`SPEED ${(difficultyMultiplier * 100).toFixed(0)}%`, CENTER_X, 118);
+            ctx.restore();
+        } else if (currentState === STATE.GAMEOVER) {
+            ctx.fillStyle = 'rgba(5, 3, 12, 0.72)';
+            ctx.fillRect(0, 0, V_WIDTH, V_HEIGHT);
+
+            ctx.save();
+            ctx.shadowBlur = 18;
+            ctx.shadowColor = '#ff007f';
+            ctx.fillStyle = '#ff007f';
+            ctx.font = '900 30px "Segoe UI", Roboto, sans-serif';
+            ctx.fillText('SYNAPSE SEVERED', CENTER_X, 130);
+            ctx.restore();
+
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+            ctx.font = '600 13px "Segoe UI", Roboto, sans-serif';
+            ctx.fillText('FINAL SCORE', CENTER_X, 195);
+
+            ctx.save();
+            ctx.shadowBlur = 12;
+            ctx.shadowColor = '#00f3ff';
+            ctx.fillStyle = '#ffffff';
+            ctx.font = '800 48px "Segoe UI", Roboto, sans-serif';
+            ctx.fillText(Math.floor(score).toString(), CENTER_X, 245);
+            ctx.restore();
+
+            ctx.fillStyle = '#00f3ff';
+            ctx.font = '600 14px "Segoe UI", Roboto, sans-serif';
+            ctx.fillText(`BEST: ${bestScore}`, CENTER_X, 280);
+
+            const retryAlpha = 0.5 + Math.sin(corePulse * 1.5) * 0.5;
+            ctx.fillStyle = `rgba(255, 255, 255, ${retryAlpha})`;
+            ctx.font = '700 16px "Segoe UI", Roboto, sans-serif';
+            ctx.fillText('TAP TO RECONNECT', CENTER_X, V_HEIGHT - 95);
+        }
+    }
+
+    function gameLoop(timestamp) {
+        if (isPaused) return;
+        if (!lastFrameTime) lastFrameTime = timestamp;
+        const dt = Math.min(0.05, (timestamp - lastFrameTime) / 1000);
+        lastFrameTime = timestamp;
+
+        update(dt);
+        draw();
+
+        rafId = requestAnimationFrame(gameLoop);
+    }
+
+    function onPauseGame() {
+        if (isPaused) return;
+        isPaused = true;
+        audio.mute();
+        if (rafId) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+        }
+    }
+
+    function onResumeGame() {
+        if (!isPaused) return;
+        isPaused = false;
+        lastFrameTime = performance.now();
+        audio.unmute();
+        if (!rafId) {
+            rafId = requestAnimationFrame(gameLoop);
+        }
+    }
+
+    function init() {
+        initBackground();
+        player.reset();
+        YT_SDK.initLifecycle(onPauseGame, onResumeGame);
+        draw();
+        YT_SDK.firstFrameReady();
+        lastFrameTime = performance.now();
+        rafId = requestAnimationFrame(gameLoop);
+    }
+
+    init();
+})();
+</script>
+</body>
+</html>
